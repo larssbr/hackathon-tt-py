@@ -7,12 +7,17 @@ import pytest
 from pydantic import ValidationError
 
 from src.models import (
+    ImportClassification,
+    ImportMapping,
+    LibraryMethodMapping,
     NodeKind,
     PassResult,
     QuarantinedNode,
     TranslationPipelineConfig,
     TranslationResult,
     TranslationStatus,
+    TypeFieldMapping,
+    TypeSurfaceEntry,
 )
 
 

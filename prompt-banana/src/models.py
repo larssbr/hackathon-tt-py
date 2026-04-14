@@ -24,6 +24,16 @@ class NodeKind(str, Enum):
     ENUM_REF = "enum_ref"
     GENERIC_TYPE = "generic_type"
     ARROW_FUNCTION = "arrow_function"
+    VARIABLE_DECL = "variable_decl"
+    FOR_LOOP = "for_loop"
+    CONDITIONAL = "conditional"
+    BIG_JS_EXPR = "big_js_expr"
+    DATE_FNS_CALL = "date_fns_call"
+    LODASH_CALL = "lodash_call"
+    OPTIONAL_CHAIN = "optional_chain"
+    NULLISH_COALESCE = "nullish_coalesce"
+    TYPE_ANNOTATION = "type_annotation"
+    OBJECT_DESTRUCTURE = "object_destructure"
     UNKNOWN = "unknown"
 
 
@@ -97,9 +107,62 @@ class TranslationPipelineConfig(BaseModel):
     max_method_lines: int = 200
     indent: str = "    "  # 4 spaces — PEP 8
     passes: list[str] = Field(default_factory=list)
+    import_map_path: Path | None = None  # project-specific tt_import_map.json
 
     @model_validator(mode="after")
     def indent_must_be_whitespace(self) -> "TranslationPipelineConfig":
         if self.indent.strip():
             raise ValueError("indent must contain only whitespace characters")
         return self
+
+
+# ---------------------------------------------------------------------------
+# Dependency analysis models
+# ---------------------------------------------------------------------------
+
+
+class ImportClassification(str, Enum):
+    """How an import should be handled during translation."""
+
+    EXTERNAL_LIB = "external_lib"         # Big.js, date-fns, lodash → Python equiv
+    INTERNAL_PROVIDED = "internal_provided"  # already in wrapper/scaffold
+    INTERNAL_TRANSLATE = "internal_translate"  # must be translated
+    FRAMEWORK_DROP = "framework_drop"       # NestJS decorators, Prisma → drop
+
+
+class ImportMapping(BaseModel):
+    """Maps one TypeScript import to its Python translation strategy."""
+
+    ts_module: str           # e.g. 'big.js', 'date-fns', '@ghostfolio/common/helper'
+    ts_symbols: list[str]    # e.g. ['Big'], ['format', 'isBefore']
+    classification: ImportClassification
+    py_module: str | None = None   # e.g. 'decimal', 'datetime'
+    py_symbols: list[str] = Field(default_factory=list)  # e.g. ['Decimal']
+    notes: str = ""
+
+
+class LibraryMethodMapping(BaseModel):
+    """Maps a single library method call from TypeScript to Python."""
+
+    ts_pattern: str      # e.g. '.plus(', 'new Big('
+    py_replacement: str  # e.g. ' + ', 'Decimal('
+    is_operator: bool = False   # True if TS method becomes Python operator
+    notes: str = ""
+
+
+class TypeFieldMapping(BaseModel):
+    """Maps a TypeScript interface field to its Python equivalent."""
+
+    ts_name: str         # e.g. 'grossPerformance'
+    ts_type: str         # e.g. 'Big'
+    py_type: str         # e.g. 'Decimal'
+    py_name: str | None = None  # if different from ts_name (snake_case conversion)
+
+
+class TypeSurfaceEntry(BaseModel):
+    """Describes one TypeScript interface and its Python representation."""
+
+    ts_interface: str     # e.g. 'SymbolMetrics'
+    ts_file: str          # source file path
+    fields: list[TypeFieldMapping] = Field(default_factory=list)
+    py_representation: str = "dict"  # 'dict', 'TypedDict', 'dataclass'

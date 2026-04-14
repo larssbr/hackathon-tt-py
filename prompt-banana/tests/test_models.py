@@ -125,3 +125,85 @@ class TestTranslationPipelineConfig:
         cfg = TranslationPipelineConfig(fail_on_quarantine=True, max_method_lines=50)
         assert cfg.fail_on_quarantine is True
         assert cfg.max_method_lines == 50
+
+
+# ---------------------------------------------------------------------------
+# ImportMapping
+# ---------------------------------------------------------------------------
+
+class TestImportMapping:
+    def test_external_lib_mapping(self) -> None:
+        m = ImportMapping(
+            ts_module="big.js",
+            ts_symbols=["Big"],
+            classification=ImportClassification.EXTERNAL_LIB,
+            py_module="decimal",
+            py_symbols=["Decimal"],
+        )
+        assert m.classification == ImportClassification.EXTERNAL_LIB
+        assert m.py_module == "decimal"
+
+    def test_internal_provided(self) -> None:
+        m = ImportMapping(
+            ts_module="@ghostfolio/api/app/portfolio/calculator/portfolio-calculator",
+            ts_symbols=["PortfolioCalculator"],
+            classification=ImportClassification.INTERNAL_PROVIDED,
+            notes="Already in wrapper layer",
+        )
+        assert m.classification == ImportClassification.INTERNAL_PROVIDED
+
+    def test_framework_drop(self) -> None:
+        m = ImportMapping(
+            ts_module="@nestjs/common",
+            ts_symbols=["Logger"],
+            classification=ImportClassification.FRAMEWORK_DROP,
+        )
+        assert m.py_module is None
+
+
+# ---------------------------------------------------------------------------
+# LibraryMethodMapping
+# ---------------------------------------------------------------------------
+
+class TestLibraryMethodMapping:
+    def test_operator_mapping(self) -> None:
+        m = LibraryMethodMapping(
+            ts_pattern=".plus(",
+            py_replacement=" + (",
+            is_operator=True,
+        )
+        assert m.is_operator is True
+
+    def test_function_mapping(self) -> None:
+        m = LibraryMethodMapping(
+            ts_pattern="cloneDeep(",
+            py_replacement="copy.deepcopy(",
+            is_operator=False,
+        )
+        assert m.is_operator is False
+
+
+# ---------------------------------------------------------------------------
+# TypeSurfaceEntry
+# ---------------------------------------------------------------------------
+
+class TestTypeSurfaceEntry:
+    def test_symbol_metrics_entry(self) -> None:
+        entry = TypeSurfaceEntry(
+            ts_interface="SymbolMetrics",
+            ts_file="libs/common/src/lib/interfaces/symbol-metrics.interface.ts",
+            fields=[
+                TypeFieldMapping(ts_name="grossPerformance", ts_type="Big", py_type="Decimal"),
+                TypeFieldMapping(ts_name="netPerformance", ts_type="Big", py_type="Decimal"),
+                TypeFieldMapping(ts_name="hasErrors", ts_type="boolean", py_type="bool"),
+            ],
+        )
+        assert len(entry.fields) == 3
+        assert entry.fields[0].py_type == "Decimal"
+
+    def test_default_representation_is_dict(self) -> None:
+        entry = TypeSurfaceEntry(
+            ts_interface="PortfolioOrder",
+            ts_file="interfaces/portfolio-order.interface.ts",
+        )
+        assert entry.py_representation == "dict"

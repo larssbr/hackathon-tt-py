@@ -95,8 +95,8 @@ def translate_methods(code: str) -> PassResult:
     def replace(m: re.Match[str]) -> str:
         nonlocal translated
         name = m.group("name")
-        params = m.group("params")
-        if "<" in params:
+        generics = m.group("generics")
+        if generics:
             quarantined.append(
                 QuarantinedNode(
                     kind=NodeKind.METHOD,
@@ -110,6 +110,7 @@ def translate_methods(code: str) -> PassResult:
 
     pattern = re.compile(
         r"(?:public|protected|private)?\s*(?:async\s+)?(?P<name>\w+)"
+        r"(?P<generics><[^>]+>)?"
         r"\s*\((?P<params>[^)]*)\)\s*(?::\s*[\w<>\[\]|, ]+)?\s*\{",
     )
     output = pattern.sub(replace, code)
@@ -415,21 +416,25 @@ def translate_for_loops(code: str) -> PassResult:
 
 
 def translate_conditionals(code: str) -> PassResult:
-    """Rewrite `if (expr) {` → `if expr:` and `} else {` → `else:`."""
+    """Rewrite `if (expr) {` → `if expr:` and `} else {` → `else:`.
+
+    Order matters: elif must be matched before if, otherwise the if pattern
+    consumes the `if` inside `else if`.
+    """
     translated = 0
     output = code
+
+    # } else if (expr) { → elif expr:  (MUST run before simple if)
+    elif_pat = re.compile(r"\}\s*else\s+if\s*\((.+?)\)\s*\{")
+    elif_m = elif_pat.findall(output)
+    output = elif_pat.sub(r"elif \1:", output)
+    translated += len(elif_m)
 
     # if (expr) { → if expr:
     if_pat = re.compile(r"if\s*\((.+?)\)\s*\{")
     if_m = if_pat.findall(output)
     output = if_pat.sub(r"if \1:", output)
     translated += len(if_m)
-
-    # } else if (expr) { → elif expr:
-    elif_pat = re.compile(r"\}\s*else\s+if\s*\((.+?)\)\s*\{")
-    elif_m = elif_pat.findall(output)
-    output = elif_pat.sub(r"elif \1:", output)
-    translated += len(elif_m)
 
     # } else { → else:
     else_pat = re.compile(r"\}\s*else\s*\{")

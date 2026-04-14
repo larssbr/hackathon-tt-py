@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from tt.ast_parser import parse_typescript
+from tt.ast_walker import ASTWalker
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +545,25 @@ def extract_method_body(source: str, method_name: str) -> str | None:
 
 
 def translate_method_body(ts_method: str) -> str:
-    """Run the pipeline on a single extracted TS method body. Pure: str → str."""
-    return run_pipeline(ts_method)
+    """Run the AST parser on a single extracted TS method body. Pure: str → str."""
+    ts_source = f"class DUMMY {{\n{ts_method}\n}}"
+    tree = parse_typescript(ts_source)
+    source_bytes = ts_source.encode("utf-8")
+    walker = ASTWalker(source_bytes)
+    
+    method_node = None
+    for c in tree.root_node.children:
+        if c.type == "class_declaration":
+            body = c.child_by_field_name("body")
+            if body:
+                for bc in body.children:
+                    if bc.type == "method_definition":
+                        method_node = bc
+                        break
+    if not method_node:
+        return "# Failed to parse method node via AST"
+    
+    return walker.visit(method_node)
 
 
 def indent_block(code: str, level: int = 1) -> str:

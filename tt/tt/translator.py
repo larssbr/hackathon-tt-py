@@ -81,36 +81,92 @@ def translate_new_big(code: str) -> str:
 
 
 def translate_big_methods(code: str) -> str:
-    """Rewrite Big.js method chains to Python operators."""
-    # .plus(x) → + (x)
+    """Rewrite Big.js method chains to Python operators.
+
+    Each `.plus(` → ` + (` introduces an extra open-paren whose matching close
+    is the `)` that already ends the argument.  For a simple call like
+    `a.plus(b)` the transformation `a + (b)` is balanced.  For nested chains
+    like `a.plus(b.times(c))` the naive substitution gives `a + (b * (c))` —
+    one unmatched `)`.  _balance_big_chain(), called at the end, fixes this by
+    tracking paren depth and inserting the missing closes.
+    """
+    # Arithmetic
     code = re.sub(r"\.plus\(", " + (", code)
-    # .minus(x) → - (x)
     code = re.sub(r"\.minus\(", " - (", code)
-    # .mul(x) → * (x)
     code = re.sub(r"\.mul\(", " * (", code)
-    # .times(x) → * (x)
     code = re.sub(r"\.times\(", " * (", code)
-    # .div(x) → / (x)
     code = re.sub(r"\.div\(", " / (", code)
-    # .add(x) → + (x)  (Big.js alias)
     code = re.sub(r"\.add\(", " + (", code)
-    # .eq(x) → == (x)
+    # Comparisons
     code = re.sub(r"\.eq\(", " == (", code)
-    # .gt(x) → > (x)
     code = re.sub(r"\.gt\(", " > (", code)
-    # .gte(x) → >= (x)
     code = re.sub(r"\.gte\(", " >= (", code)
-    # .lt(x) → < (x)
     code = re.sub(r"\.lt\(", " < (", code)
-    # .lte(x) → <= (x)
     code = re.sub(r"\.lte\(", " <= (", code)
-    # .abs() → abs(x) — needs context, leave as method for now
+    # Unary / conversion helpers
     code = re.sub(r"(\w+)\.abs\(\)", r"abs(\1)", code)
-    # .toNumber() → float(x)
     code = re.sub(r"(\w+)\.toNumber\(\)", r"float(\1)", code)
-    # .toFixed(n) → round(x, n)
     code = re.sub(r"(\w+)\.toFixed\((\d+)\)", r"round(\1, \2)", code)
+    # Balance any parens left open by the chain rewrites above
+    code = _balance_big_chain(code)
     return code
+
+
+def _balance_big_chain(code: str) -> str:
+    """Close the extra open-paren introduced by each Big.js operator rewrite.
+
+    translate_big_methods converts `.plus(x)` to ` + (x)` — balanced for a
+    simple argument, but broken for nested chains:
+
+        a.plus(b.times(c))  →  a + (b * (c))   ← one unmatched )
+
+    Walk character by character; track how many operator-injected open-parens
+    are still outstanding, and append the missing closes at end-of-expression
+    (i.e. when depth returns to zero after accounting for real parens).
+    """
+    _OP_TOKENS = (" + (", " - (", " * (", " / (",
+                  " == (", " > (", " >= (", " < (", " <= (")
+
+    def balance_line(line: str) -> str:
+        out = []
+        i = 0
+        # depth = number of chain-operator opens that still need a close
+        depth = 0
+        while i < len(line):
+            # Check for an injected operator token starting here
+            found_op = False
+            for tok in _OP_TOKENS:
+                if line[i:i + len(tok)] == tok:
+                    out.append(tok)
+                    i += len(tok)
+                    depth += 1
+                    found_op = True
+                    break
+            if found_op:
+                continue
+
+            ch = line[i]
+            if ch == "(":
+                # A real open-paren inside an argument — need a matching close
+                depth += 1
+                out.append(ch)
+            elif ch == ")":
+                if depth > 0:
+                    depth -= 1
+                out.append(ch)
+            else:
+                out.append(ch)
+            i += 1
+
+        # If any chain opens are still unmatched, close them now
+        out.append(")" * depth)
+        return "".join(out)
+
+    lines = code.split("\n")
+    return "\n".join(
+        balance_line(line) if any(tok in line for tok in _OP_TOKENS) else line
+        for line in lines
+    )
 
 
 def translate_date_fns(code: str) -> str:
@@ -427,22 +483,33 @@ def strip_private_fields(code: str) -> str:
 
 
 def fix_trailing_parens(code: str) -> str:
-    """Best-effort fix for unmatched parens left over from Big.js chain rewrites.
+    """Remove lines that consist solely of orphaned closing delimiters.
 
-    Scans each line and removes excess closing parens/brackets that have no
-    matching opener on the same line or a preceding continuation.
+    After all rewrites, lines like a bare `)` or `);` are leftover artefacts
+    from TS block syntax (e.g. the closing paren of an IIFE or a chained call
+    that has already been flattened).  Strip them so they don't cause
+    SyntaxErrors in the generated Python.
+
+    Lines that are *structurally* valid Python (e.g. the `)` closing a
+    multi-line function call) are kept — we only drop lines whose stripped
+    content is *entirely* a closing delimiter with no matching open on any
+    prior unclosed context.  As a conservative heuristic we remove lines
+    whose stripped form is one of the known-orphan patterns.
     """
+    _ORPHAN = {")", "];", "],", ");", "):", ");", "})", "});", "},", "},"}
+
     lines = code.split("\n")
+    # Track running paren depth so we keep lines that legitimately close a
+    # multi-line expression.
+    depth = 0
     result = []
     for line in lines:
-        # Count open/close parens in the line
-        opens = line.count("(") + line.count("[") + line.count("{")
-        closes = line.count(")") + line.count("]") + line.count("}")
-        # If a line is just excess closing delimiters, strip it
         stripped = line.strip()
-        if stripped in (")", "]", ");", "],", "):", "});"):
-            # Check if this is truly orphaned — keep it, it might be valid
-            pass
+        if stripped in _ORPHAN and depth <= 0:
+            # Truly orphaned — drop it
+            continue
+        # Update depth (rough: count unquoted parens)
+        depth += line.count("(") + line.count("[") - line.count(")") - line.count("]")
         result.append(line)
     return "\n".join(result)
 

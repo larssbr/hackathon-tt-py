@@ -30,7 +30,17 @@ def visit_binary_expression(walker, node) -> str:
     left = walker.visit(node.child_by_field_name("left"))
     right = walker.visit(node.child_by_field_name("right"))
     op = walker.extract_text(node.child_by_field_name("operator"))
+    op_map = {"===": "==", "!==": "!=", "&&": "and", "||": "or"}
+    op = op_map.get(op, op)
     return f"{left} {op} {right}"
+
+@register("unary_expression")
+def visit_unary_expression(walker, node) -> str:
+    op = walker.extract_text(node.child_by_field_name("operator"))
+    arg = walker.visit(node.child_by_field_name("argument"))
+    if op == "!":
+        return f"not {arg}"
+    return f"{op}{arg}"
 
 @register("assignment_expression")
 def visit_assignment_expression(walker, node) -> str:
@@ -103,7 +113,19 @@ def _visit_member_call(obj_str, prop_str, args_list):
     if prop_str == "at":
         return f"{obj_str}[{args_list[0] if args_list else 0}]"
     if prop_str == "filter":
-        return f"{obj_str}.filter({', '.join(args_list)})"
+        # Emit a list comprehension: [x for x in obj if <predicate>]
+        # args_list[0] is the already-visited lambda/arrow string, e.g.
+        # "lambda x: x.get('type')" or "lambda x: x > 0"
+        if args_list:
+            pred = args_list[0]
+            # Extract the parameter name and body from a lambda string
+            import re as _re
+            m = _re.match(r"lambda\s+(\w+)\s*:\s*(.+)", pred.strip())
+            if m:
+                param, body = m.group(1), m.group(2).strip()
+                return f"[{param} for {param} in {obj_str} if {body}]"
+        # Fallback: can't parse the predicate, emit a filter() call
+        return f"list(filter({', '.join(args_list)}, {obj_str}))"
     return f"{obj_str}.{prop_str}({', '.join(args_list)})"
 
 def _visit_standalone_call(walker, fn_node, args_list):

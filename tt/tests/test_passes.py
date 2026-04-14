@@ -3,28 +3,40 @@ from __future__ import annotations
 
 import pytest
 from tt.translator import (
+    comment_out,
+    extract_method_body,
+    indent_block,
+    is_valid_python,
+    normalize_comments,
     normalize_whitespace,
     run_pipeline,
     strip_access_modifiers,
     strip_braces,
+    strip_console_log,
     strip_exports,
     strip_imports,
+    strip_private_fields,
     strip_semicolons,
     strip_type_annotations,
+    translate_array_methods,
     translate_arrow_to_lambda,
     translate_big_methods,
     translate_class_decl,
     translate_conditionals,
     translate_date_fns,
+    translate_filter,
     translate_for_loops,
     translate_includes,
     translate_lodash,
     translate_methods,
     translate_new_big,
     translate_nullish_coalescing,
+    translate_object_patterns,
+    translate_object_shorthand,
     translate_optional_chaining,
     translate_returns,
     translate_template_literals,
+    translate_this,
     translate_variables,
 )
 
@@ -32,6 +44,22 @@ from tt.translator import (
 # ---------------------------------------------------------------------------
 # Phase 1: Structural cleanup
 # ---------------------------------------------------------------------------
+
+
+class TestNormalizeComments:
+    def test_smart_quotes(self) -> None:
+        code = "# the activity\u2019s unit price"
+        assert "\u2019" not in normalize_comments(code)
+
+    def test_single_line_comment(self) -> None:
+        result = normalize_comments("x = 1; // this is a comment")
+        assert "//" not in result
+        assert "#" in result
+
+    def test_multi_line_comment(self) -> None:
+        result = normalize_comments("x = 1; /* block */ y = 2;")
+        assert "/*" not in result
+        assert "x = 1;" in result
 
 
 class TestStripImports:
@@ -263,6 +291,61 @@ class TestTranslateTemplateLiterals:
         assert 'f"Hello {name}"' in result
 
 
+class TestTranslateThis:
+    def test_simple(self) -> None:
+        assert "self.activities" in translate_this("this.activities")
+
+    def test_chained(self) -> None:
+        assert "self.x.y" in translate_this("this.x.y")
+
+
+class TestTranslateFilter:
+    def test_destructured_filter(self) -> None:
+        code = 'arr.filter(({ type }) => { return type; })'
+        result = translate_filter(code)
+        assert "for x in arr" in result
+        assert "type" in result
+
+    def test_simple_filter(self) -> None:
+        code = 'items.filter((x) => { return x.active; })'
+        result = translate_filter(code)
+        assert "for" in result
+
+
+class TestTranslateArrayMethods:
+    def test_length(self) -> None:
+        assert "len(arr)" in translate_array_methods("arr.length")
+
+    def test_push(self) -> None:
+        assert ".append(" in translate_array_methods("arr.push(x)")
+
+    def test_at_negative(self) -> None:
+        assert "arr[-1]" in translate_array_methods("arr.at(-1)")
+
+
+class TestTranslateObjectPatterns:
+    def test_object_keys(self) -> None:
+        result = translate_object_patterns("Object.keys(map)")
+        assert "list(map.keys())" in result
+
+    def test_instanceof(self) -> None:
+        result = translate_object_patterns("x instanceof Big")
+        assert "isinstance(x, Decimal)" in result
+
+
+class TestTranslateObjectShorthand:
+    def test_simple_return(self) -> None:
+        code = 'return {\n  x,\n  y,\n}'
+        result = translate_object_shorthand(code)
+        assert '"x": x' in result
+        assert '"y": y' in result
+
+    def test_key_value_kept(self) -> None:
+        code = 'return {\n  key: value,\n}'
+        result = translate_object_shorthand(code)
+        assert '"key": value' in result
+
+
 class TestTranslateIncludes:
     def test_includes(self) -> None:
         result = translate_includes("['BUY', 'SELL'].includes(type)")
@@ -278,6 +361,18 @@ class TestTranslateReturns:
 # ---------------------------------------------------------------------------
 # Phase 4: Cleanup
 # ---------------------------------------------------------------------------
+
+
+class TestStripConsoleLog:
+    def test_removes_console_log(self) -> None:
+        result = strip_console_log("  console.log('hi');")
+        assert "console" not in result
+
+
+class TestStripPrivateFields:
+    def test_removes_field_decl(self) -> None:
+        result = strip_private_fields("  chartDates: string[];")
+        assert "chartDates" not in result.strip()
 
 
 class TestStripSemicolons:
@@ -306,6 +401,44 @@ class TestNormalizeWhitespace:
 # ---------------------------------------------------------------------------
 # Integration: full pipeline
 # ---------------------------------------------------------------------------
+
+
+class TestIsValidPython:
+    def test_valid(self) -> None:
+        assert is_valid_python("x = 1\nprint(x)")
+
+    def test_invalid(self) -> None:
+        assert not is_valid_python("def f(: pass")
+
+
+class TestCommentOut:
+    def test_comments_code(self) -> None:
+        result = comment_out("x = 1\ny = 2")
+        assert result.startswith("# x = 1")
+        assert "# y = 2" in result
+
+
+class TestIndentBlock:
+    def test_one_level(self) -> None:
+        result = indent_block("x = 1\ny = 2", level=1)
+        assert result == "    x = 1\n    y = 2"
+
+
+class TestExtractMethodBody:
+    def test_simple_method(self) -> None:
+        ts = "class Foo { protected bar() { return 1; } }"
+        body = extract_method_body(ts, "bar")
+        assert body is not None
+        assert "return 1" in body
+
+    def test_not_found(self) -> None:
+        assert extract_method_body("class Foo {}", "missing") is None
+
+    def test_nested_braces(self) -> None:
+        ts = "protected calc() { if (x) { return 1; } return 0; }"
+        body = extract_method_body(ts, "calc")
+        assert body is not None
+        assert "return 0" in body
 
 
 class TestRunPipeline:

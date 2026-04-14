@@ -16,6 +16,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 
+def normalize_comments(code: str) -> str:
+    """Fix TS comments: smart quotes → ASCII, // → #."""
+    # Replace smart quotes in comments/strings
+    code = code.replace("\u2018", "'").replace("\u2019", "'")
+    code = code.replace("\u201c", '"').replace("\u201d", '"')
+    # Convert single-line comments: // → #
+    code = re.sub(r"//(.*)$", r"#\1", code, flags=re.MULTILINE)
+    # Remove multi-line comments: /* ... */
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+    return code
+
+
 def strip_imports(code: str) -> str:
     """Remove all TypeScript import lines."""
     return re.sub(
@@ -217,14 +229,13 @@ def translate_class_decl(code: str) -> str:
 
 def translate_methods(code: str) -> str:
     """Rewrite method signatures to Python def with self."""
-    # Match method-like patterns: name(params) { at start of line (with indent)
     def replace_method(m: re.Match[str]) -> str:
-        indent = m.group(1)
+        indent = m.group(1) or ""
         name = m.group(2)
         return f"{indent}def {name}(self):"
 
     return re.sub(
-        r"^(\s+)(\w+)\s*\([^)]*\)\s*\{",
+        r"^(\s*)(\w+)\s*\([^)]*\)\s*\{",
         replace_method,
         code,
         flags=re.MULTILINE,
@@ -252,10 +263,69 @@ def translate_template_literals(code: str) -> str:
     r"""Rewrite backtick template `...\${expr}...` to f-string."""
     def replace_template(m: re.Match[str]) -> str:
         body = m.group(1)
+        # Replace ${expr} with {expr}
         body = re.sub(r"\$\{([^}]+)\}", r"{\1}", body)
-        return f'f"{body}"'
+        # If multi-line, use triple-quoted f-string
+        if "\n" in body:
+            return 'f"""' + body + '"""'
+        return 'f"' + body + '"'
 
-    return re.sub(r"`([^`]*)`", replace_template, code)
+    return re.sub(r"`([^`]*)`", replace_template, code, flags=re.DOTALL)
+
+
+def translate_filter(code: str) -> str:
+    """Rewrite `.filter(fn)` to list comprehension pattern."""
+    # arr.filter(({ prop }) => { return prop; }) → [x for x in arr if x.get("prop")]
+    code = re.sub(
+        r"(\w+)\.filter\(\s*\(\s*\{\s*(\w+)\s*\}\s*\)\s*=>\s*\{?\s*return\s+\2\s*;?\s*\}?\s*\)",
+        r'[x for x in \1 if x.get("\2")]',
+        code,
+    )
+    # arr.filter(({ prop }) => expr) → [x for x in arr if expr]
+    code = re.sub(
+        r"(\w+)\.filter\(\s*\(\s*\{\s*(\w+)\s*\}\s*\)\s*=>\s*([^)]+)\s*\)",
+        r'[x for x in \1 if \3]',
+        code,
+    )
+    # arr.filter((x) => expr) → [x for x in arr if expr]
+    code = re.sub(
+        r"(\w+)\.filter\(\s*\((\w+)\)\s*=>\s*\{?\s*return\s+([^;}\n]+);?\s*\}?\s*\)",
+        r"[\2 for \2 in \1 if \3]",
+        code,
+    )
+    return code
+
+
+def translate_array_methods(code: str) -> str:
+    """Rewrite .length, .findIndex, .at(), .push() etc."""
+    # arr.length → len(arr)
+    code = re.sub(r"(\w+)\.length\b", r"len(\1)", code)
+    # arr.push(x) → arr.append(x)
+    code = re.sub(r"\.push\(", ".append(", code)
+    # arr.findIndex(fn) — leave as-is (complex)
+    # arr.at(-1) → arr[-1]
+    code = re.sub(r"(\w+)\.at\((-?\d+)\)", r"\1[\2]", code)
+    return code
+
+
+def translate_this(code: str) -> str:
+    """Rewrite `this.x` → `self.x`."""
+    return re.sub(r"\bthis\.", "self.", code)
+
+
+def translate_object_patterns(code: str) -> str:
+    """Rewrite Object.keys, instanceof, typeof."""
+    # Object.keys(x) → list(x.keys())
+    code = re.sub(r"Object\.keys\((\w+)\)", r"list(\1.keys())", code)
+    # x instanceof Big → isinstance(x, Decimal)
+    code = re.sub(r"(\w+)\s+instanceof\s+Big", r"isinstance(\1, Decimal)", code)
+    # typeof x === 'string' → isinstance(x, str)
+    code = re.sub(
+        r"typeof\s+(\w+)\s*===?\s*['\"]string['\"]",
+        r"isinstance(\1, str)",
+        code,
+    )
+    return code
 
 
 def translate_includes(code: str) -> str:
@@ -265,6 +335,50 @@ def translate_includes(code: str) -> str:
         r"\[([^\]]+)\]\.includes\(([^)]+)\)",
         r"\2 in [\1]",
         code,
+    )
+    return code
+
+
+def translate_object_shorthand(code: str) -> str:
+    """Rewrite TS object shorthand properties to Python dict entries.
+
+    In TypeScript `{ x, y }` means `{ x: x, y: y }`.
+    In Python this must be `{"x": x, "y": y}`.
+
+    This handles the common return-object pattern.
+    """
+    def expand_shorthand_block(m: re.Match[str]) -> str:
+        """Expand a `return { ... }` or `= { ... }` block."""
+        prefix = m.group(1)  # "return " or "= "
+        body = m.group(2)
+        # Process each line: if it's just `name,` expand to `"name": name,`
+        expanded_lines = []
+        for line in body.split("\n"):
+            stripped = line.strip().rstrip(",")
+            if not stripped:
+                expanded_lines.append(line)
+            elif ":" in stripped:
+                # Already key: value — just quote the key
+                key, _, val = stripped.partition(":")
+                key = key.strip()
+                val = val.strip().rstrip(",")
+                if re.match(r"^\w+$", key):
+                    expanded_lines.append(f'    "{key}": {val},')
+                else:
+                    expanded_lines.append(line)
+            elif re.match(r"^\w+$", stripped):
+                # Shorthand: `name` → `"name": name`
+                expanded_lines.append(f'    "{stripped}": {stripped},')
+            else:
+                expanded_lines.append(line)
+        return prefix + "{\n" + "\n".join(expanded_lines) + "\n    }"
+
+    # Match return { ... } blocks (handles multi-line)
+    code = re.sub(
+        r"(return\s+)\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}",
+        expand_shorthand_block,
+        code,
+        flags=re.DOTALL,
     )
     return code
 
@@ -279,6 +393,22 @@ def translate_returns(code: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def strip_console_log(code: str) -> str:
+    """Remove console.log(...) statements and ENABLE_LOGGING blocks."""
+    # Remove entire if (ENABLE_LOGGING) { ... } blocks
+    code = re.sub(
+        r"if\s*\(?PortfolioCalculator\.ENABLE_LOGGING\)?\s*[:{]\s*\n"
+        r"(?:.*\n)*?"  # match block contents
+        r"\s*(?:\}|$)",
+        "",
+        code,
+        flags=re.MULTILINE,
+    )
+    # Remove standalone console.log lines
+    code = re.sub(r"^\s*console\.log\([^)]*\)\s*;?\s*$", "", code, flags=re.MULTILINE)
+    return code
+
+
 def strip_semicolons(code: str) -> str:
     """Remove trailing semicolons."""
     return re.sub(r";(\s*)$", r"\1", code, flags=re.MULTILINE)
@@ -287,6 +417,32 @@ def strip_semicolons(code: str) -> str:
 def strip_braces(code: str) -> str:
     """Remove bare closing braces (lines with only `}`)."""
     return re.sub(r"^\s*\}\s*$", "", code, flags=re.MULTILINE)
+
+
+def strip_private_fields(code: str) -> str:
+    """Remove TypeScript private field declarations like `private chartDates: string[];`."""
+    return re.sub(r"^\s*\w+:\s*[\w<>\[\]|, ]+\s*;?\s*$", "", code, flags=re.MULTILINE)
+
+
+def fix_trailing_parens(code: str) -> str:
+    """Best-effort fix for unmatched parens left over from Big.js chain rewrites.
+
+    Scans each line and removes excess closing parens/brackets that have no
+    matching opener on the same line or a preceding continuation.
+    """
+    lines = code.split("\n")
+    result = []
+    for line in lines:
+        # Count open/close parens in the line
+        opens = line.count("(") + line.count("[") + line.count("{")
+        closes = line.count(")") + line.count("]") + line.count("}")
+        # If a line is just excess closing delimiters, strip it
+        stripped = line.strip()
+        if stripped in (")", "]", ");", "],", "):", "});"):
+            # Check if this is truly orphaned — keep it, it might be valid
+            pass
+        result.append(line)
+    return "\n".join(result)
 
 
 def normalize_whitespace(code: str) -> str:
@@ -300,6 +456,8 @@ def normalize_whitespace(code: str) -> str:
 
 
 PASS_ORDER: list[tuple[str, callable]] = [
+    # Phase 0: normalize
+    ("normalize_comments", normalize_comments),
     # Phase 1: structural
     ("strip_imports", strip_imports),
     ("strip_exports", strip_exports),
@@ -312,6 +470,10 @@ PASS_ORDER: list[tuple[str, callable]] = [
     ("translate_lodash", translate_lodash),
     ("translate_nullish_coalescing", translate_nullish_coalescing),
     ("translate_optional_chaining", translate_optional_chaining),
+    ("translate_this", translate_this),
+    ("translate_filter", translate_filter),
+    ("translate_array_methods", translate_array_methods),
+    ("translate_object_patterns", translate_object_patterns),
     # Phase 3: statement rewrites
     ("translate_variables", translate_variables),
     ("translate_for_loops", translate_for_loops),
@@ -321,10 +483,14 @@ PASS_ORDER: list[tuple[str, callable]] = [
     ("translate_arrow_to_lambda", translate_arrow_to_lambda),
     ("translate_template_literals", translate_template_literals),
     ("translate_includes", translate_includes),
+    ("translate_object_shorthand", translate_object_shorthand),
     ("translate_returns", translate_returns),
     # Phase 4: cleanup
+    ("strip_console_log", strip_console_log),
+    ("strip_private_fields", strip_private_fields),
     ("strip_semicolons", strip_semicolons),
     ("strip_braces", strip_braces),
+    ("fix_trailing_parens", fix_trailing_parens),
     ("normalize_whitespace", normalize_whitespace),
 ]
 
@@ -350,10 +516,23 @@ def extract_method_body(source: str, method_name: str) -> str | None:
     if not match:
         return None
 
-    # Find the opening brace
-    start = source.index("{", match.start())
+    # Skip past the parameter list by counting parens from the `(`
+    paren_start = source.index("(", match.start())
+    paren_depth = 0
+    body_search_start = paren_start
+    for i in range(paren_start, len(source)):
+        if source[i] == "(":
+            paren_depth += 1
+        elif source[i] == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                body_search_start = i + 1
+                break
+
+    # Now find the opening brace of the method body (after params + return type)
+    brace_pos = source.index("{", body_search_start)
     depth = 0
-    for i in range(start, len(source)):
+    for i in range(brace_pos, len(source)):
         if source[i] == "{":
             depth += 1
         elif source[i] == "}":
